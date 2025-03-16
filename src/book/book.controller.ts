@@ -9,13 +9,16 @@ import {
   UseInterceptors,
   BadRequestException,
   UploadedFile,
+  UploadedFiles,
+  Query,
 } from '@nestjs/common';
 import { BookService } from './book.service';
 import { CreateBookDto } from './dto/create-book.dto';
 import { UpdateBookDto } from './dto/update-book.dto';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { storage } from './my-file-storage';
 import * as path from 'path';
+import * as fs from 'fs';
 
 @Controller('book')
 export class BookController {
@@ -68,7 +71,77 @@ export class BookController {
     if (!file) {
       throw new BadRequestException('文件上传失败');
     }
-    console.log('file', file);
     return file.path;
+  }
+
+  // 写一个分片上传
+  @Post('short/upload')
+  @UseInterceptors(
+    FilesInterceptor('files', 2000, {
+      dest: 'uploads',
+    }),
+  )
+  uploadFiles(
+    @UploadedFiles() files: Array<Express.Multer.File>,
+    @Body() body: { name: string },
+  ) {
+    const match = body.name.match(/(.+)\-\d+$/);
+    if (!match) {
+      throw new BadRequestException('Invalid file name format');
+    }
+    const fileName = match[1];
+    const chunkDir = 'uploads/chunks_' + fileName;
+
+    if (!fs.existsSync(chunkDir)) {
+      fs.mkdirSync(chunkDir);
+    }
+    fs.cpSync(files[0].path, chunkDir + '/' + body.name);
+    fs.rmSync(files[0].path);
+  }
+
+  private getLastPartAfterDash(fileName: string): number {
+    const lastDashIndex = fileName.lastIndexOf('-');
+    if (lastDashIndex === -1) {
+      throw new BadRequestException('Invalid file name format');
+    }
+    return parseInt(fileName.substring(lastDashIndex + 1), 10);
+  }
+
+  @Get('short/merge')
+  merge(@Query('name') name: string) {
+    const chunkDir = 'uploads/chunks_' + name;
+
+    let files = fs.readdirSync(chunkDir);
+
+    files = files.sort(
+      (a, b) => this.getLastPartAfterDash(a) - this.getLastPartAfterDash(b),
+    );
+    let count = 0;
+    let startPos = 0;
+    files.map((file) => {
+      console.log('file', file);
+      const filePath = chunkDir + '/' + file;
+      const stream = fs.createReadStream(filePath);
+      stream
+        .pipe(
+          fs.createWriteStream('uploads/' + name, {
+            start: startPos,
+          }),
+        )
+        .on('finish', () => {
+          count++;
+
+          if (count === files.length) {
+            fs.rm(
+              chunkDir,
+              {
+                recursive: true,
+              },
+              () => {},
+            );
+          }
+        });
+      startPos += fs.statSync(filePath).size;
+    });
   }
 }
